@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"net/textproto"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,13 +25,20 @@ type Config struct {
 	Channels []string
 }
 
-func main() {
-	config := getConfig()
-	conn := connect(config)
-	catchSigterm(conn)
+var (
+	conn   net.Conn
+	config Config
+)
 
-	go loopNicks(conn, config)
-	go joinChannels(conn, config)
+func main() {
+	config = getConfig()
+	conn = connect(config)
+	catchSigterm()
+
+	send("USER _ 0 * :Go")
+
+	go loopNicks()
+	go joinChannels()
 
 	tp := textproto.NewReader(bufio.NewReader(conn))
 	for {
@@ -37,7 +46,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		read(conn, status)
+		read(status)
 	}
 }
 
@@ -55,12 +64,12 @@ func getConfig() Config {
 	return config
 }
 
-func catchSigterm(conn net.Conn) {
+func catchSigterm() {
 	c := make(chan os.Signal)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		disconnect(conn)
+		disconnect()
 	}()
 }
 
@@ -74,48 +83,101 @@ func connect(cfg Config) net.Conn {
 	return conn
 }
 
-func disconnect(conn net.Conn) {
-	send(conn, "QUIT :Finished")
+func disconnect() {
+	send("QUIT :Finished")
 	conn.Close()
 	os.Exit(0)
 }
 
-func send(conn net.Conn, message string) {
+func send(message string) {
 	log.Printf("-> %s", message)
 	fmt.Fprintf(conn, "%s\r\n", message)
 }
 
-func read(conn net.Conn, message string) {
-	log.Printf("<- %s", message)
+func read(message string) {
+	raw := getRaw(message)
+	if raw > 0 {
+		parseRaw(raw, message)
+	}
 
 	if strings.HasPrefix(message, "PING") {
-		pongCode := strings.Split(message, ":")
-		send(conn, fmt.Sprintf("PONG :%s", pongCode[1]))
+		replyPing(message)
 	}
 }
 
-func loopNicks(conn net.Conn, cfg Config) {
-	send(conn, "USER _ 0 * :Go")
+func getRaw(message string) int {
+	// :stirling.chathispano.com 433 * :El nick n está en uso.
+	if !strings.HasPrefix(message, ":") {
+		return 0
+	}
 
+	parts := strings.Split(message, " ")
+
+	raw, err := strconv.Atoi(parts[1])
+
+	if err != nil {
+		return 0
+	}
+
+	return raw
+}
+
+func parseRaw(raw int, message string) {
+	switch raw {
+	case 433, // Nick in use
+		451, // Not registered
+		464: // Invalid password
+		setNick(randomString(8))
+		return
+	case 372, 375, 376: // MOTD
+		return
+	default:
+		log.Printf("<- %s", message)
+	}
+}
+
+func replyPing(message string) {
+	pongCode := strings.Split(message, ":")
+	send(fmt.Sprintf("PONG :%s", pongCode[1]))
+}
+
+func setNick(nick string) {
+	nickName := strings.Split(nick, ":")
+	log.Printf("Changing nick to %s", nickName[0])
+	send(fmt.Sprintf("NICK %s", nick))
+}
+
+func loopNicks() {
 	log.Println("Starting nicks...")
 
-	for _, nick := range cfg.Nicklist {
-		log.Printf("Changing nick to %s", nick)
-		send(conn, fmt.Sprintf("NICK %s", nick))
+	for _, nick := range config.Nicklist {
+		setNick(nick)
 		time.Sleep(30 * time.Second)
 	}
 
 	log.Println("End of nicks")
 
-	disconnect(conn)
+	disconnect()
 }
 
-func joinChannels(conn net.Conn, cfg Config) {
-	time.Sleep(5 * time.Second)
-	if len(cfg.Channels) > 0 {
-		for _, channel := range cfg.Channels {
+func joinChannels() {
+	if len(config.Channels) > 0 {
+		time.Sleep(5 * time.Second)
+		for _, channel := range config.Channels {
 			log.Printf("Joining channel #%s ...", channel)
-			send(conn, fmt.Sprintf("JOIN #%s", channel))
+			send(fmt.Sprintf("JOIN #%s", channel))
 		}
 	}
+}
+
+func randomString(n int) string {
+	var letters = []rune("aeiouAEIOU")
+
+	s := make([]rune, n)
+
+	for i := range s {
+		s[i] = letters[rand.Intn(len(letters))]
+	}
+
+	return string(s)
 }

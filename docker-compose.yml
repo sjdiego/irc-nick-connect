@@ -1,0 +1,9 @@
+version: "3.2"
+
+services:
+  irc-nick-connect:
+    build:
+      dockerfile: Dockerfile
+      context: .
+    volumes:
+      - ./config.yml:/app/config.yml
